@@ -1,0 +1,82 @@
+#include <jni.h>
+#include <android/hardware_buffer.h>
+#include <android/log.h>
+#include <libyuv.h>
+#include <cstring>
+
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "NV21_TO_NV12", __VA_ARGS__)
+
+// Function to convert NV21 HardwareBuffer to NV12 HardwareBuffer
+extern "C" JNIEXPORT jobject JNICALL
+Java_com_example_yuvbuffer_NV21ToNV12_convertHardwareBuffer(
+        JNIEnv *env, jobject, jobject nv21BufferObj, jint width, jint height) {
+
+    // Step 1: Get the AHardwareBuffer from Java HardwareBuffer object
+    AHardwareBuffer* nv21Buffer = AHardwareBuffer_fromHardwareBuffer(env, nv21BufferObj);
+    if (!nv21Buffer) {
+        LOGD("Failed to get AHardwareBuffer from Java object");
+        return nullptr;
+    }
+
+    // Step 2: Lock NV21 buffer to read data
+    void* nv21Data = nullptr;
+    AHardwareBuffer_lock(nv21Buffer, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, nullptr, &nv21Data);
+    if (!nv21Data) {
+        LOGD("Failed to lock NV21 buffer");
+        AHardwareBuffer_release(nv21Buffer);
+        return nullptr;
+    }
+
+    // Step 3: Allocate a new NV12 HardwareBuffer
+    AHardwareBuffer_Desc desc = {};
+    desc.width = width;
+    desc.height = height;
+    desc.layers = 1;
+    desc.format = AHARDWAREBUFFER_FORMAT_Y8CbCr420_888;  // Format compatible with NV12
+    desc.usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE | AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN;
+
+    AHardwareBuffer* nv12Buffer = nullptr;
+    if (AHardwareBuffer_allocate(&desc, &nv12Buffer) != 0) {
+        LOGD("Failed to allocate NV12 HardwareBuffer");
+        AHardwareBuffer_unlock(nv21Buffer, nullptr);
+        AHardwareBuffer_release(nv21Buffer);
+        return nullptr;
+    }
+
+    // Step 4: Lock NV12 buffer for writing
+    void* nv12Data = nullptr;
+    AHardwareBuffer_lock(nv12Buffer, AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, -1, nullptr, &nv12Data);
+    if (!nv12Data) {
+        LOGD("Failed to lock NV12 buffer");
+        AHardwareBuffer_unlock(nv21Buffer, nullptr);
+        AHardwareBuffer_release(nv21Buffer);
+        AHardwareBuffer_release(nv12Buffer);
+        return nullptr;
+    }
+
+    // Step 5: Convert NV21 to NV12 using libyuv
+    uint8_t* yPlaneSrc = (uint8_t*)nv21Data;                      // NV21 Y plane
+    uint8_t* vuPlaneSrc = yPlaneSrc + (width * height);           // NV21 interleaved VU plane
+
+    uint8_t* yPlaneDst = (uint8_t*)nv12Data;                      // NV12 Y plane
+    uint8_t* uvPlaneDst = yPlaneDst + (width * height);           // NV12 interleaved UV plane
+
+    libyuv::NV21ToNV12(
+        yPlaneSrc, width,        // NV21 Y plane
+        vuPlaneSrc, width,       // NV21 interleaved VU plane
+        yPlaneDst, width,        // NV12 Y plane
+        uvPlaneDst, width        // NV12 interleaved UV plane
+        ,height                  // Image height
+    );
+
+    // Step 6: Unlock and release buffers
+    AHardwareBuffer_unlock(nv21Buffer, nullptr);
+    AHardwareBuffer_unlock(nv12Buffer, nullptr);
+    AHardwareBuffer_release(nv21Buffer);
+
+    // Step 7: Convert NV12 AHardwareBuffer to Java HardwareBuffer object
+    jobject javaNv12Buffer = AHardwareBuffer_toHardwareBuffer(env, nv12Buffer);
+    AHardwareBuffer_release(nv12Buffer); // Release native reference
+
+    return javaNv12Buffer;
+}
