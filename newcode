@@ -1,0 +1,116 @@
+import android.graphics.ImageFormat
+import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraDevice
+import android.hardware.camera2.CameraManager
+import android.media.Image
+import android.media.ImageReader
+import android.os.Handler
+import android.os.HandlerThread
+import android.util.Log
+import android.view.Surface
+import androidx.appcompat.app.AppCompatActivity
+import java.util.Arrays
+
+class CameraActivity : AppCompatActivity() {
+
+    private lateinit var cameraManager: CameraManager
+    private lateinit var cameraDevice: CameraDevice
+    private lateinit var captureSession: CameraCaptureSession
+    private lateinit var handler: Handler
+    private lateinit var handlerThread: HandlerThread
+
+    private lateinit var privateImageReader: ImageReader
+    private lateinit var yuvImageReader: ImageReader
+
+    override fun onStart() {
+        super.onStart()
+
+        // Initialize CameraManager
+        cameraManager = getSystemService(CAMERA_SERVICE) as CameraManager
+
+        // Create a background thread for camera operations
+        handlerThread = HandlerThread("CameraBackgroundThread")
+        handlerThread.start()
+        handler = Handler(handlerThread.looper)
+
+        // Open the camera
+        openCamera()
+    }
+
+    private fun openCamera() {
+        try {
+            val cameraId = cameraManager.cameraIdList[0] // Use the first available camera
+            cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
+                override fun onOpened(camera: CameraDevice) {
+                    cameraDevice = camera
+                    setupImageReaders()
+                    createCaptureSession()
+                }
+
+                override fun onDisconnected(camera: CameraDevice) {
+                    camera.close()
+                }
+
+                override fun onError(camera: CameraDevice, error: Int) {
+                    camera.close()
+                }
+            }, handler)
+        } catch (e: Exception) {
+            Log.e("CameraActivity", "Error opening camera", e)
+        }
+    }
+
+    private fun setupImageReaders() {
+        // Create ImageReader for PRIVATE format
+        privateImageReader = ImageReader.newInstance(1920, 1080, ImageFormat.PRIVATE, 2).apply {
+            setOnImageAvailableListener({ reader ->
+                val image = reader.acquireLatestImage()
+                processImage(image, "PRIVATE")
+                image.close()
+            }, handler)
+        }
+
+        // Create ImageReader for YUV_420_888 format
+        yuvImageReader = ImageReader.newInstance(1920, 1080, ImageFormat.YUV_420_888, 2).apply {
+            setOnImageAvailableListener({ reader ->
+                val image = reader.acquireLatestImage()
+                processImage(image, "YUV_420_888")
+                image.close()
+            }, handler)
+        }
+    }
+
+    private fun createCaptureSession() {
+        val surfaces = Arrays.asList(privateImageReader.surface, yuvImageReader.surface)
+        cameraDevice.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
+            override fun onConfigured(session: CameraCaptureSession) {
+                captureSession = session
+                startPreview()
+            }
+
+            override fun onConfigureFailed(session: CameraCaptureSession) {
+                Log.e("CameraActivity", "Capture session configuration failed")
+            }
+        }, handler)
+    }
+
+    private fun startPreview() {
+        val captureRequest = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+            addTarget(privateImageReader.surface)
+            addTarget(yuvImageReader.surface)
+        }
+        captureSession.setRepeatingRequest(captureRequest.build(), null, handler)
+    }
+
+    private fun processImage(image: Image, format: String) {
+        val hardwareBuffer = image.hardwareBuffer
+        Log.d("CameraActivity", "Image format: $format, HardwareBuffer format: ${hardwareBuffer.format}")
+    }
+
+    override fun onStop() {
+        super.onStop()
+        cameraDevice.close()
+        handlerThread.quitSafely()
+    }
+}
