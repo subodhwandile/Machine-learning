@@ -1,90 +1,71 @@
-#include <jni.h>
-#include <android/hardware_buffer.h>
-#include <android/log.h>
-#include <libyuv.h>
-#include <cstring>
+@Test
+fun rawImagetoHardwareBufferFromatCheck() {
+    rawImagetoHardwareBufferFromatCheckHelper(arrayOf("0"), ImageFormat.YUV_420_888)
+}
 
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "NV21_TO_NV12", __VA_ARGS__)
+private fun rawImagetoHardwareBufferFromatCheckHelper(
+    cameraIdList: Array<String>,
+    format: Int
+) {
+    val camera = Camera2Basic(cameraIdList)
 
-// JNI function to convert NV21 HardwareBuffer to NV12 HardwareBuffer
-extern "C" JNIEXPORT jobject JNICALL
-Java_com_example_yuvbuffer_NV21ToNV12_convertHardwareBuffer(
-        JNIEnv *env, jobject, jobject srcBufferObj) {
+    activityRule.scenario.onActivity { activity ->
+        camera.previewSize.run {
+            activity.changePreviewSurfaceSize(width, height)
+        }
 
-    // Step 1: Get the AHardwareBuffer from Java HardwareBuffer object
-    AHardwareBuffer* srcBuffer = AHardwareBuffer_fromHardwareBuffer(env, srcBufferObj);
-    if (!srcBuffer) {
-        LOGD("Failed to get AHardwareBuffer from Java object");
-        return nullptr;
+        // ✅ Step 1: Increase ImageReader Resolution
+        val width = 640
+        val height = 480
+        val maxImages = 2 // Buffer size
+
+        val imageReader = ImageReader.newInstance(width, height, format, maxImages)
+
+        // ✅ Step 2: Create and Start HandlerThread
+        val imageReaderThread = HandlerThread("ImageReaderThread").apply { start() }
+        val imageReaderHandler = Handler(imageReaderThread.looper)
+
+        // ✅ Step 3: Set Image Available Listener BEFORE starting preview
+        imageReader.setOnImageAvailableListener({ reader ->
+            val image = reader.acquireLatestImage()
+            if (image != null) {
+                val hwbuffer = image.hardwareBuffer
+                Log.d("ImageReader", "Image acquired, HardwareBuffer: $hwbuffer")
+
+                if (hwbuffer != null) {
+                    val srcBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+
+                    for (x in 0 until width) {
+                        for (y in 0 until height) {
+                            val color = 0xFFFF0000.toInt()
+                            srcBitmap.setPixel(x, y, color)
+                        }
+                    }
+
+                    copyFromBitmap(hwbuffer, srcBitmap)
+                }
+
+                image.close() // ✅ Always close the image after processing
+            } else {
+                Log.e("ImageReader", "No image received")
+            }
+        }, imageReaderHandler) // ✅ Pass a valid handler
+
+        // ✅ Step 4: Start Camera Preview
+        activity.runOnUiThread {
+            camera.configure(viewSurface = imageReader.surface)
+            camera.startPreview()
+        }
+
+        // ✅ Step 5: Timeout Handling (Wait for image)
+        runBlocking {
+            withTimeout(5000L) {
+                delay(1000L) // Allow time for images to arrive
+            }
+        }
+
+        // ✅ Step 6: Stop Preview and Cleanup
+        camera.stopPreview()
+        imageReaderThread.quitSafely()
     }
-
-    // Step 2: Get HardwareBuffer description (to determine width & height)
-    AHardwareBuffer_Desc desc;
-    AHardwareBuffer_describe(srcBuffer, &desc);
-    int width = desc.width;
-    int height = desc.height;
-
-    // Step 3: Lock NV21 buffer to read data
-    void* srcData = nullptr;
-    AHardwareBuffer_lock(srcBuffer, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, nullptr, &srcData);
-    if (!srcData) {
-        LOGD("Failed to lock NV21 buffer");
-        AHardwareBuffer_release(srcBuffer);
-        return nullptr;
-    }
-
-    // Step 4: Allocate a new NV12 HardwareBuffer
-    AHardwareBuffer_Desc nv12Desc = {};
-    nv12Desc.width = width;
-    nv12Desc.height = height;
-    nv12Desc.layers = 1;
-    nv12Desc.format = AHARDWAREBUFFER_FORMAT_Y8CbCr420_888;  // Format compatible with NV12
-    nv12Desc.usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE | AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN;
-
-    AHardwareBuffer* nv12Buffer = nullptr;
-    if (AHardwareBuffer_allocate(&nv12Desc, &nv12Buffer) != 0) {
-        LOGD("Failed to allocate NV12 HardwareBuffer");
-        AHardwareBuffer_unlock(srcBuffer, nullptr);
-        AHardwareBuffer_release(srcBuffer);
-        return nullptr;
-    }
-
-    // Step 5: Lock NV12 buffer for writing
-    void* dstData = nullptr;
-    AHardwareBuffer_lock(nv12Buffer, AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, -1, nullptr, &dstData);
-    if (!dstData) {
-        LOGD("Failed to lock NV12 buffer");
-        AHardwareBuffer_unlock(srcBuffer, nullptr);
-        AHardwareBuffer_release(srcBuffer);
-        AHardwareBuffer_release(nv12Buffer);
-        return nullptr;
-    }
-
-    // Step 6: Extract YUV planes from source NV21 buffer
-    uint8_t* yPlaneSrc = (uint8_t*)srcData;                      // NV21 Y plane
-    uint8_t* vuPlaneSrc = yPlaneSrc + (width * height);          // NV21 interleaved VU plane
-
-    // Step 7: Extract YUV planes from destination NV12 buffer
-    uint8_t* yPlaneDst = (uint8_t*)dstData;                      // NV12 Y plane
-    uint8_t* uvPlaneDst = yPlaneDst + (width * height);          // NV12 interleaved UV plane
-
-    // Step 8: Convert NV21 to NV12 using libyuv
-    libyuv::NV21ToNV12(
-        yPlaneSrc, width,        // NV21 Y plane
-        vuPlaneSrc, width,       // NV21 interleaved VU plane
-        yPlaneDst, width,        // NV12 Y plane
-        uvPlaneDst, width        // NV12 interleaved UV plane
-        ,height                  // Image height
-    );
-
-    // Step 9: Unlock and release buffers
-    AHardwareBuffer_unlock(srcBuffer, nullptr);
-    AHardwareBuffer_unlock(nv12Buffer, nullptr);
-    AHardwareBuffer_release(srcBuffer);
-
-    // Step 10: Convert NV12 AHardwareBuffer to Java HardwareBuffer object
-    jobject javaNv12Buffer = AHardwareBuffer_toHardwareBuffer(env, nv12Buffer);
-    AHardwareBuffer_release(nv12Buffer); // Release native reference
-
-    return javaNv12Buffer;
 }
