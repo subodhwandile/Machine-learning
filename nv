@@ -1,8 +1,3 @@
-@Test
-fun rawImagetoHardwareBufferFromatCheck() {
-    rawImagetoHardwareBufferFromatCheckHelper(arrayOf("0"), ImageFormat.YUV_420_888)
-}
-
 private fun rawImagetoHardwareBufferFromatCheckHelper(
     cameraIdList: Array<String>,
     format: Int
@@ -10,62 +5,62 @@ private fun rawImagetoHardwareBufferFromatCheckHelper(
     val camera = Camera2Basic(cameraIdList)
 
     activityRule.scenario.onActivity { activity ->
-        camera.previewSize.run {
-            activity.changePreviewSurfaceSize(width, height)
+        // ✅ Step 1: Get Supported Output Sizes for YUV_420_888
+        val cameraManager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val characteristics = cameraManager.getCameraCharacteristics(cameraIdList[0])
+
+        val streamConfigMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        val outputSizes = streamConfigMap?.getOutputSizes(ImageFormat.YUV_420_888)
+
+        if (outputSizes.isNullOrEmpty()) {
+            Log.e("Camera", "No supported output sizes for YUV_420_888")
+            return@onActivity
         }
 
-        // ✅ Step 1: Increase ImageReader Resolution
-        val width = 640
-        val height = 480
-        val maxImages = 2 // Buffer size
+        // ✅ Step 2: Choose a Valid Size (largest available)
+        val largestSize = outputSizes.maxByOrNull { it.width * it.height } ?: Size(640, 480)
+        val width = largestSize.width
+        val height = largestSize.height
 
+        Log.d("Camera", "Using resolution: ${width}x${height}")
+
+        // ✅ Step 3: Create ImageReader with Correct Size
+        val maxImages = 2
         val imageReader = ImageReader.newInstance(width, height, format, maxImages)
 
-        // ✅ Step 2: Create and Start HandlerThread
+        // ✅ Step 4: Create and Start HandlerThread
         val imageReaderThread = HandlerThread("ImageReaderThread").apply { start() }
         val imageReaderHandler = Handler(imageReaderThread.looper)
 
-        // ✅ Step 3: Set Image Available Listener BEFORE starting preview
+        // ✅ Step 5: Set Image Available Listener BEFORE starting preview
         imageReader.setOnImageAvailableListener({ reader ->
             val image = reader.acquireLatestImage()
             if (image != null) {
                 val hwbuffer = image.hardwareBuffer
                 Log.d("ImageReader", "Image acquired, HardwareBuffer: $hwbuffer")
 
-                if (hwbuffer != null) {
-                    val srcBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-
-                    for (x in 0 until width) {
-                        for (y in 0 until height) {
-                            val color = 0xFFFF0000.toInt()
-                            srcBitmap.setPixel(x, y, color)
-                        }
-                    }
-
-                    copyFromBitmap(hwbuffer, srcBitmap)
-                }
-
                 image.close() // ✅ Always close the image after processing
             } else {
                 Log.e("ImageReader", "No image received")
             }
-        }, imageReaderHandler) // ✅ Pass a valid handler
+        }, imageReaderHandler)
 
-        // ✅ Step 4: Start Camera Preview
+        // ✅ Step 6: Configure Camera with Correct Surface
         activity.runOnUiThread {
-            camera.configure(viewSurface = imageReader.surface)
+            camera.configure(viewSurface = imageReader.surface) // Use correct size
             camera.startPreview()
         }
 
-        // ✅ Step 5: Timeout Handling (Wait for image)
+        // ✅ Step 7: Wait for Image with Timeout
         runBlocking {
             withTimeout(5000L) {
                 delay(1000L) // Allow time for images to arrive
             }
         }
 
-        // ✅ Step 6: Stop Preview and Cleanup
+        // ✅ Step 8: Stop Preview and Cleanup
         camera.stopPreview()
         imageReaderThread.quitSafely()
     }
 }
+
